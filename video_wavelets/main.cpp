@@ -10,7 +10,7 @@
 using namespace std;
 using namespace cv;
 
-enum TYPE_THRESHOLDING {ENERGY_TH, MAX_TH, MEAN_TH, CUMULATION_TH, SSQ_CUMULATION_TH} ;
+enum TYPE_THRESHOLDING { ENERGY0_PIX_TH, ENERGY0_DWT_TH, WHOLE_ENERGY_DWT_TH, CUMULATION_TH/*, SSQ_CUMULATION_TH*/ };
 
 void fwt97(double* x, int n)
 {
@@ -121,8 +121,17 @@ void wt97_in_place(const vector<double> &c, vector<double> &x, int Ls)
 {
 	x = c;
 	int n = x.size();
+	// coefficients from Sweldens, Daubechies 1997
 	double alpha = -1.586134342, beta = -0.05298011854, gamma = 0.8829110762, delta = 0.4435068522, dzeta = 1 / 1.149604398;
 	int i;
+
+
+	// another source of coefficients
+	//double 
+	//k1 = 0.230174104914126,//0.81289306611596146 
+	//k2 = 1.6257861322319229;//0.61508705245700002 
+	/*double k1 = 0.8128930661160001;
+	double k2 = 1. / k1;*/
 
 	for (size_t k = 0; k < Ls; k++){
 
@@ -158,6 +167,12 @@ void wt97_in_place(const vector<double> &c, vector<double> &x, int Ls)
 			if ((i >> k) % 2) x[i] *= dzeta;
 			else x[i] /= dzeta;
 		}
+
+		/*for (i = 0; i<n; i += s) {
+			if ((i >> k) % 2) x[i] *= k2;
+			else x[i] *= k1;
+		}*/
+
 	}
 }
 
@@ -168,6 +183,13 @@ void iwt97_in_place(const vector<double> &c, vector<double> &x, int Ls)
 	double alpha = 1.586134342, beta = 0.05298011854, gamma = -0.8829110762, delta = -0.4435068522, dzeta = 1.149604398;
 	int i;
 
+	// another sources of coefficients
+	//# Inverse scale coeffs :
+	//double k1 = 1.230174104914, k2 = 1.6257861322319229;
+	
+	/*double k1 = 0.8128930661160001;
+	double k2 = 1. / k1;*/
+
 	for (int k = Ls - 1; k >= 0; k--){
 
 		int s = (1 << k), s1 = (2 << k);
@@ -176,6 +198,11 @@ void iwt97_in_place(const vector<double> &c, vector<double> &x, int Ls)
 			if ((i >> k) % 2) x[i] *= dzeta;
 			else x[i] /= dzeta;
 		}
+
+		/*for (i = 0; i<n; i += s) {
+			if ((i >> k) % 2) x[i] /= k2;
+			else x[i] /= k1;
+		}*/
 
 		// undo Update 2
 		for (i = s1; i<n; i += s1) {
@@ -265,7 +292,7 @@ void iwt1D(const vector<double> &c, vector<double> &iwt, vector<double> p, int i
 
 void wavelet_by_region_rgb(vector<Mat> &src, int num_frames, int reg_w, int reg_h,
 	vector<Mat> &wt, vector<Mat> &rec, vector<vector<int>> &keep_regions_by_frames, int &regs_x, int &regs_y, vector<double> p, int ip,
-	vector<double> u, int iu, int Ls, double th, int typeThresholding, bool isGlobalTh = true, bool isCDF97 = false, bool testInverse = true)
+	vector<double> u, int iu, int Ls, double th, int typeThresholding, bool isCDF97 = false, bool testInverse = true)
 {
 
 	int rows = src[0].rows, cols = src[0].cols;
@@ -276,21 +303,25 @@ void wavelet_by_region_rgb(vector<Mat> &src, int num_frames, int reg_w, int reg_
 
 	// initial rgb energy
 	vector<double> rgb_energy(n_regions, 0.0);
-
+	vector<double> whole_pix_energy(n_regions, 0.0);
 	// copy data 
 	vector<vector<double>> dataR(n_pixels, vector<double>(num_frames, 0.0));
 	vector<vector<double>> dataG(n_pixels, vector<double>(num_frames, 0.0));
 	vector<vector<double>> dataB(n_pixels, vector<double>(num_frames, 0.0));
 	for (int idx = 0; idx < n_pixels; idx++){
 		int y = idx / cols, x = idx % cols;
+		int _y = y / reg_h, _x = x / reg_w;
+		int _id = _y * regs_x + _x;
+
 		for (size_t i = 0; i < num_frames; i++){
 			dataR[idx][i] = src[i].at<Vec3b>(y, x)[2];
 			dataG[idx][i] = src[i].at<Vec3b>(y, x)[1];
 			dataB[idx][i] = src[i].at<Vec3b>(y, x)[0];
+
+			whole_pix_energy[_id] += dataR[idx][i] * dataR[idx][i] + 
+				dataG[idx][i] * dataG[idx][i] + dataB[idx][i] * dataB[idx][i];
 		}
 
-		int _y = y / reg_h, _x = x / reg_w;
-		int _id = _y * regs_x + _x;
 		rgb_energy[_id] += dataR[idx][0] * dataR[idx][0] + dataG[idx][0] * dataG[idx][0] + dataB[idx][0] * dataB[idx][0];
 	}
 
@@ -374,11 +405,10 @@ void wavelet_by_region_rgb(vector<Mat> &src, int num_frames, int reg_w, int reg_
 
 	// take into account only detail coefficients in dwt
 	vector<vector<double>> energies(num_frames, vector<double>(n_regions, 0.0));
-	vector<double> max_energy(n_regions, 0);
-	vector<double> mean_energy(n_regions, 0);
+	vector<double> whole_energy(n_regions, 0);
 	vector<double> cumul_energy(n_regions, 0);
 	double global_max_energy = 0;
-	for (size_t i = 1; i < num_frames; i++){
+	for (size_t i = 0; i < num_frames; i++){
 
 		for (int idx = 0; idx < n_pixels; idx++){
 			int _y = (idx / cols) / reg_h, _x = (idx % cols) / reg_w;
@@ -389,22 +419,8 @@ void wavelet_by_region_rgb(vector<Mat> &src, int num_frames, int reg_w, int reg_
 		}
 
 		for (size_t j = 0; j < n_regions; j++){
-			mean_energy[j] += energies[i][j];
-			if (energies[i][j] > max_energy[j])
-				max_energy[j] = energies[i][j];
-			if (energies[i][j] > global_max_energy)
-				global_max_energy = energies[i][j];
+			whole_energy[j] += energies[i][j];
 		}
-	}
-
-	double global_mean_energy = 0;
-	for (size_t j = 0; j < n_regions; j++){
-		global_mean_energy += mean_energy[j];
-	}
-	global_mean_energy /= ((num_frames - 1) * n_regions);
-	
-	for (size_t j = 0; j < n_regions; j++){
-		mean_energy[j] /= (num_frames - 1);
 	}
 
 	// Find kept regions of frames
@@ -412,31 +428,29 @@ void wavelet_by_region_rgb(vector<Mat> &src, int num_frames, int reg_w, int reg_
 	for (size_t i = 0; i < n_regions; i++){
 		keep_regions_by_frames[0].push_back(i);
 	}
-	int saved_regions = num_frames;
+	int saved_regions = n_regions;
 	int whole_skip = 0;
 	for (size_t i = 1; i < num_frames; i++){
 		bool isSkip = true;
 		for (size_t j = 0; j < n_regions; j++){
 			switch (typeThresholding){
-				case ENERGY_TH:
+				case ENERGY0_PIX_TH:
 				if (energies[i][j] / rgb_energy[j] > th){
 					keep_regions_by_frames[i].push_back(j);
 					saved_regions++;
 					isSkip = false;
 				}
 				break;
-				case MAX_TH:
-					if (energies[i][j] / max_energy[j] > th && !isGlobalTh ||
-						energies[i][j] / global_max_energy > th && isGlobalTh){
+				case ENERGY0_DWT_TH:
+					if (energies[i][j] / energies[0][j] > th){
 						keep_regions_by_frames[i].push_back(j);
 						saved_regions++;
 						isSkip = false;
 					}
 					break;
 
-				case MEAN_TH: 
-					if (energies[i][j] / global_mean_energy > th && isGlobalTh ||
-						energies[i][j] / mean_energy[j] > th && !isGlobalTh){
+				case WHOLE_ENERGY_DWT_TH: 
+					if (energies[i][j] / whole_energy[j] > th){
 						keep_regions_by_frames[i].push_back(j);
 						saved_regions++;
 						isSkip = false;
@@ -474,11 +488,18 @@ void wavelet_by_region_rgb(vector<Mat> &src, int num_frames, int reg_w, int reg_
 	cout << "skipped frames = " << whole_skip << endl;
 	cout << "mean_skip_with_0_frame = " << 1.0 - saved_percent << endl;
 	cout << "mean_skipped = " << 1.0 - saved_percent + 1.0 / num_frames << endl;
+	double w_pix = 0.0, w_e = 0.0;
+	for (size_t i = 0; i < n_regions; i++){
+		w_pix += whole_pix_energy[i];
+		w_e += whole_energy[i];
+	}
+	cout << "mean_whole_pix_energy = " << w_pix/n_pixels << endl;
+	cout << "mean_whole_energy = " << w_e/n_pixels << endl;
 }
 
 void wavelet_by_region_gray(vector<Mat> &src, int num_frames, int reg_w, int reg_h,
 	vector<Mat> &wt, vector<Mat> &rec, vector<vector<int>> &keep_regions_by_frames, int &regs_x, int &regs_y, vector<double> p, int ip,
-	vector<double> u, int iu, int Ls, double th, int typeThresholding, bool isGlobalTh = true, bool isCDF97 = false, bool testInverse = true)
+	vector<double> u, int iu, int Ls, double th, int typeThresholding, bool isCDF97 = false, bool testInverse = true)
 {
 
 	int rows = src[0].rows, cols = src[0].cols;
@@ -487,20 +508,21 @@ void wavelet_by_region_gray(vector<Mat> &src, int num_frames, int reg_w, int reg
 
 	int n_pixels = rows*cols, n_regions = regs_x * regs_y;
 	int saved_regions = 0;
-	// initial rgb energy
+	// initial gray energy
 	vector<double> gray_energy(n_regions, 0.0);
-
+	vector<double> whole_pix_energy(n_regions, 0.0);
 	// copy data 
 	vector<vector<double>> data(n_pixels, vector<double>(num_frames, 0.0));
 	
 	for (int idx = 0; idx < n_pixels; idx++){
 		int y = idx / cols, x = idx % cols;
-		for (size_t i = 0; i < num_frames; i++){
-			data[idx][i] = src[i].at<uchar>(y, x);
-		}
-
 		int _y = y / reg_h, _x = x / reg_w;
 		int _id = _y * regs_x + _x;
+		for (size_t i = 0; i < num_frames; i++){
+			data[idx][i] = src[i].at<uchar>(y, x);
+			whole_pix_energy[_id] += data[idx][i] * data[idx][i];
+		}
+
 		gray_energy[_id] += data[idx][0] * data[idx][0];
 	}
 
@@ -546,12 +568,10 @@ void wavelet_by_region_gray(vector<Mat> &src, int num_frames, int reg_w, int reg
 
 	// take into account only detail coefficients in dwt
 	vector<vector<double>> energies(num_frames, vector<double>(n_regions, 0.0));
-	vector<double> max_energy(n_regions, 0);
-	vector<double> mean_energy(n_regions, 0);
+	vector<double> whole_energy(n_regions, 0);
 	vector<double> cumul_energy(n_regions, 0);
-	vector<double> ssq_cumul(n_pixels, 0);
 	double global_max_energy = 0;
-	for (size_t i = 1; i < num_frames; i++){
+	for (size_t i = 0; i < num_frames; i++){
 
 		for (int idx = 0; idx < n_pixels; idx++){
 			int _y = (idx / cols) / reg_h, _x = (idx % cols) / reg_w;
@@ -560,22 +580,8 @@ void wavelet_by_region_gray(vector<Mat> &src, int num_frames, int reg_w, int reg
 		}
 
 		for (size_t j = 0; j < n_regions; j++){
-			mean_energy[j] += energies[i][j];
-			if (energies[i][j] > max_energy[j])
-				max_energy[j] = energies[i][j];
-			if (energies[i][j] > global_max_energy)
-				global_max_energy = energies[i][j];
+			whole_energy[j] += energies[i][j];
 		}
-	}
-
-	double global_mean_energy = 0;
-	for (size_t j = 0; j < n_regions; j++){
-		global_mean_energy += mean_energy[j];
-	}
-	global_mean_energy /= ((num_frames - 1) * n_regions);
-
-	for (size_t j = 0; j < n_regions; j++){
-		mean_energy[j] /= (num_frames - 1);
 	}
 
 	// Find kept regions of frames
@@ -591,25 +597,23 @@ void wavelet_by_region_gray(vector<Mat> &src, int num_frames, int reg_w, int reg
 		for (size_t j = 0; j < n_regions; j++){
 			switch (typeThresholding){
 
-			case ENERGY_TH:
+			case ENERGY0_PIX_TH:
 				if (energies[i][j] / gray_energy[j] > th){
 					keep_regions_by_frames[i].push_back(j);
 					saved_regions++;
 					isSkip = false;
 				}
 				break;
-			case MAX_TH:
-				if (energies[i][j] / max_energy[j] > th && !isGlobalTh ||
-					energies[i][j] / global_max_energy > th && isGlobalTh){
+			case ENERGY0_DWT_TH:
+				if (energies[i][j] / energies[0][j] > th ){
 					keep_regions_by_frames[i].push_back(j);
 					saved_regions++;
 					isSkip = false;
 				}
 				break;
 
-			case MEAN_TH:
-				if (energies[i][j] / global_mean_energy > th && isGlobalTh ||
-					energies[i][j] / mean_energy[j] > th && !isGlobalTh){
+			case WHOLE_ENERGY_DWT_TH:
+				if (energies[i][j] /whole_energy[j] > th ){
 					keep_regions_by_frames[i].push_back(j);
 					saved_regions++;
 					isSkip = false;
@@ -637,7 +641,7 @@ void wavelet_by_region_gray(vector<Mat> &src, int num_frames, int reg_w, int reg
 					}
 				}
 				break;
-			case SSQ_CUMULATION_TH:
+			/*case SSQ_CUMULATION_TH:
 				
 				int reg_x = j % regs_x, reg_y = j / regs_x;
 				int end_x = ((reg_x + 1) * reg_w < cols ? (reg_x + 1) * reg_w : cols);
@@ -665,7 +669,7 @@ void wavelet_by_region_gray(vector<Mat> &src, int num_frames, int reg_w, int reg
 					}
 				}
 
-				break;
+				break;*/
 			}
 		}
 
@@ -677,6 +681,13 @@ void wavelet_by_region_gray(vector<Mat> &src, int num_frames, int reg_w, int reg
 	cout << "skipped frames = " << whole_skip << endl;
 	cout << "mean_skip_with_0_frame = "<<1.0 - saved_percent<<endl;
 	cout << "mean_skipped = " << 1.0 - saved_percent + 1.0 / num_frames<< endl;
+	double w_pix = 0.0, w_e = 0.0;
+	for (size_t i = 0; i < n_regions; i++){
+		w_pix += whole_pix_energy[i];
+		w_e += whole_energy[i];
+	}
+	cout << "whole_pix_energy = " << w_pix << endl;
+	cout << "whole_energy = " << w_e << endl;
 }
 
 void dark_regions(int reg_w, int reg_h, int regs_x, int regs_y, Mat &src, vector<int> sign_region, Mat &dst)
@@ -733,7 +744,8 @@ void write_blocks_file(string file_name, int num_frames, int block_size, vector<
 	}
 }
 
-vector<vector<int>> blocks_from_wavelets_rgb(vector<Mat> &src, int block_width, int block_height, double threshold, bool isCDF97 = false)
+vector<vector<int>> blocks_from_wavelets_rgb(vector<Mat> &src, int block_width, int block_height, double threshold, 
+	int typeThresholding = ENERGY0_PIX_TH, bool isCDF97 = false)
 {
 	int num_frames = src.size();
 	int Ls = max_dwt_level(num_frames);
@@ -786,13 +798,19 @@ vector<vector<int>> blocks_from_wavelets_rgb(vector<Mat> &src, int block_width, 
 
 	// take into account only detail coefficients in dwt
 	vector<vector<double>> energies(num_frames, vector<double>(n_blocks, 0.0));
-	for (size_t i = 1; i < num_frames; i++){
+	vector<double> whole_energy(n_blocks, 0);
+	vector<double> cumul_energy(n_blocks, 0);
+	for (size_t i = 0; i < num_frames; i++){
 		for (int idx = 0; idx < n_pixels; idx++){
 			int _y = (idx / cols) / block_height, _x = (idx % cols) / block_width;
 			int _id = _y * blocks_x + _x;
 			energies[i][_id] += dwtR[idx][i] * dwtR[idx][i];
 			energies[i][_id] += dwtG[idx][i] * dwtG[idx][i];
 			energies[i][_id] += dwtB[idx][i] * dwtB[idx][i];
+		}
+
+		for (size_t j = 0; j < n_blocks; j++){
+			whole_energy[j] += energies[i][j];
 		}
 	}
 
@@ -803,8 +821,43 @@ vector<vector<int>> blocks_from_wavelets_rgb(vector<Mat> &src, int block_width, 
 	}
 	for (size_t i = 1; i < num_frames; i++){
 		for (size_t j = 0; j < n_blocks; j++){
-			if (energies[i][j] / rgb_energy[j] > threshold){
-				keep_blocks[i].push_back(j);
+			switch (typeThresholding){
+			case ENERGY0_PIX_TH:
+				if (energies[i][j] / rgb_energy[j] > threshold){
+					keep_blocks[i].push_back(j);
+				}
+				break;
+			case ENERGY0_DWT_TH:
+				if (energies[i][j] / energies[0][j] > threshold){
+					keep_blocks[i].push_back(j);
+				}
+				break;
+
+			case WHOLE_ENERGY_DWT_TH:
+				if (energies[i][j] / whole_energy[j] > threshold){
+					keep_blocks[i].push_back(j);
+				}
+
+				break;
+
+			case CUMULATION_TH:
+				cumul_energy[j] += energies[i][j];
+				if (cumul_energy[j] / rgb_energy[j] > threshold){
+					keep_blocks[i].push_back(j);
+				
+					cumul_energy[j] = 0.0;
+					rgb_energy[j] = 0.0;
+					int reg_x = j % blocks_x, reg_y = j / blocks_x;
+					int end_x = ((reg_x + 1) * block_width < cols ? (reg_x + 1) * block_width : cols);
+					int end_y = ((reg_y + 1) * block_height < rows ? (reg_y + 1) * block_height : rows);
+					for (size_t iy = reg_y * block_height; iy < end_y; iy++){
+						for (size_t ix = reg_x * block_width; ix < end_x; ix++){
+							int id = iy * cols + ix;
+							rgb_energy[j] += dataR[id][i] * dataR[id][i] + dataG[id][i] * dataG[id][i] + dataB[id][i] * dataB[id][i];
+						}
+					}
+				}
+				break;
 			}
 		}
 	}
@@ -812,7 +865,8 @@ vector<vector<int>> blocks_from_wavelets_rgb(vector<Mat> &src, int block_width, 
 	return keep_blocks;
 }
 
-vector<vector<int>> blocks_from_wavelets_gray(vector<Mat> &src, int block_width, int block_height, double threshold, bool isCDF97 = false)
+vector<vector<int>> blocks_from_wavelets_gray(vector<Mat> &src, int block_width, int block_height, double threshold, 
+	int typeThresholding = ENERGY0_PIX_TH, bool isCDF97 = false)
 {
 	int num_frames = src.size();
 	int Ls = max_dwt_level(num_frames);
@@ -855,11 +909,16 @@ vector<vector<int>> blocks_from_wavelets_gray(vector<Mat> &src, int block_width,
 
 	// take into account only detail coefficients in dwt
 	vector<vector<double>> energies(num_frames, vector<double>(n_blocks, 0.0));
-	for (size_t i = 1; i < num_frames; i++){
+	vector<double> whole_energy(n_blocks, 0);
+	vector<double> cumul_energy(n_blocks, 0);
+	for (size_t i = 0; i < num_frames; i++){
 		for (int idx = 0; idx < n_pixels; idx++){
 			int _y = (idx / cols) / block_height, _x = (idx % cols) / block_width;
 			int _id = _y * blocks_x + _x;
 			energies[i][_id] += dwt[idx][i] * dwt[idx][i];
+		}
+		for (size_t j = 0; j < n_blocks; j++){
+			whole_energy[j] += energies[i][j];
 		}
 	}
 
@@ -871,8 +930,43 @@ vector<vector<int>> blocks_from_wavelets_gray(vector<Mat> &src, int block_width,
 	}
 	for (size_t i = 1; i < num_frames; i++){
 		for (size_t j = 0; j < n_blocks; j++){
-			if (energies[i][j] / gray_energy[j] > threshold){
-				keep_blocks[i].push_back(j);
+			switch (typeThresholding){
+			case ENERGY0_PIX_TH:
+				if (energies[i][j] / gray_energy[j] > threshold){
+					keep_blocks[i].push_back(j);
+				}
+				break;
+			case ENERGY0_DWT_TH:
+				if (energies[i][j] / energies[0][j] > threshold){
+					keep_blocks[i].push_back(j);
+				}
+				break;
+
+			case WHOLE_ENERGY_DWT_TH:
+				if (energies[i][j] / whole_energy[j] > threshold){
+					keep_blocks[i].push_back(j);
+				}
+
+				break;
+
+			case CUMULATION_TH:
+				cumul_energy[j] += energies[i][j];
+				if (cumul_energy[j] / gray_energy[j] > threshold){
+					keep_blocks[i].push_back(j);
+
+					cumul_energy[j] = 0.0;
+					gray_energy[j] = 0.0;
+					int reg_x = j % blocks_x, reg_y = j / blocks_x;
+					int end_x = ((reg_x + 1) * block_width < cols ? (reg_x + 1) * block_width : cols);
+					int end_y = ((reg_y + 1) * block_height < rows ? (reg_y + 1) * block_height : rows);
+					for (size_t iy = reg_y * block_height; iy < end_y; iy++){
+						for (size_t ix = reg_x * block_width; ix < end_x; ix++){
+							int id = iy * cols + ix;
+							gray_energy[j] += data[id][i] * data[id][i];
+						}
+					}
+				}
+				break;
 			}
 		}
 	}
@@ -910,36 +1004,45 @@ int main(int argc, char *argv [])
 	// 5-degree polynomial interpolation coefficients
 	double p6[6] = { 3. / 256, -25. / 256, 75. / 128, 75. / 128, -25. / 256, 3. / 256 };
 	int ip6 = -2;
+	/*double sum_sq = 0.0;
+	for (size_t i = 0; i < 6; i++){
+		sum_sq += p6[i] * p6[i];
+	}
+	for (size_t i = 0; i < 6; i++){
+		p6[i] *= 2.225;
+	}
+
+	cout << "sum_sq_p6 = " << sum_sq << endl;
+	*/
 
 	int batch_size = (int) inputVideo.get(CV_CAP_PROP_FRAME_COUNT);
 	cout << "number of frames = " << batch_size << endl;
 	int Ls = max_dwt_level(batch_size);
 
 	// Main parameters 
-	int tile_w = 8, tile_h = 8;
+	int tile_w = 32, tile_h = 32;
 	double threshold = 0.05;
-	int typeTh = ENERGY_TH;//SSQ_CUMULATION_TH, MAX_TH, MEAN_TH, SSQ_
-	bool isGlobal = false, isRGB = true;
-	bool isUseCDF97 = true;//Cohen-Daubechies-Feauveau (CDF)9/7 wavelets
+	int typeTh = ENERGY0_DWT_TH;//SSQ_CUMULATION_TH, MAX_TH, MEAN_TH, SSQ_
+	bool isRGB = true, isUseCDF97 = true;//Cohen-Daubechies-Feauveau (CDF)9/7 wavelets
 	
 	// forming name of output file
 	string strTypeTh;
 	switch (typeTh){
-	case ENERGY_TH:
-		strTypeTh = string("energy_");
+	case ENERGY0_PIX_TH:
+		strTypeTh = string("e0_pix_");
 		break;
-	case MAX_TH:
-		strTypeTh = string("max_");
+	case ENERGY0_DWT_TH:
+		strTypeTh = string("e0_dwt_");
 		break;
-	case MEAN_TH:
-		strTypeTh = string("mean_");
+	case WHOLE_ENERGY_DWT_TH:
+		strTypeTh = string("whole_e_");
 		break;
 	case CUMULATION_TH:
 		strTypeTh = string("cumul_");
 		break;
-	case SSQ_CUMULATION_TH:
+	/*case SSQ_CUMULATION_TH:
 		strTypeTh = string("ssq_cum_");
-		break;
+		break;*/
 	}
 	string file_reduce = name_video + string("_") + 
 		(isUseCDF97 ? string("cdf97_"): string("p6p6_")) + 
@@ -991,16 +1094,21 @@ int main(int argc, char *argv [])
 
 	// ---- check dwt
 	const int _N = 23, _L = 5;
-	double test[_N] = { 1.0, 1.5, 2.0, 1.5, 2.0, 3.0, 4.0, 5.5, 6.0, 3.5, 4.5, 1.0, 1.5, 3.5, 6.0, 9.0, -2., -4, -3, -1, -6.9, -9.0, -8.0 };
+	double test[_N] = { 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 4.5, 4.0, 3.0, 2.5, 1.5, 0.0, 0.0, -1., -2, -3.5, -1, 0, 2.0, 6.0 };
 
 	vector<double> x(test, test + _N), y(_N);
 	wt97_in_place(x, y, _L);
 	//wt1D(x, y, vector<double>(p6, p6 + sizeof(p6) / sizeof(double)), ip6, vector<double>(p6, p6 + sizeof(p6) / sizeof(double)), ip6, _L);
 	cout << "dwt 9/7" << endl;
+	double tst_sum_dwt = 0, tst_sum = 0;
 	for (size_t i = 0; i < _N; i++){
 		cout << y[i] << " ";
+		tst_sum_dwt += y[i] * y[i];
+		tst_sum += x[i] * x[i];
 	}
 	cout << endl;
+
+	cout << "ssq_dwt = " << tst_sum_dwt << " ssq = " << tst_sum << endl;
 
 	iwt97_in_place(y, x, _L);
 	//iwt1D(y, x, vector<double>(p6, p6 + sizeof(p6) / sizeof(double)), ip6, vector<double>(p6, p6 + sizeof(p6) / sizeof(double)), ip6, _L);
@@ -1062,11 +1170,11 @@ int main(int argc, char *argv [])
 			// find saved regions of frames
 			if (isRGB)wavelet_by_region_rgb(src, batch_size, tile_w, tile_h, res, rec, regions, regs_x, regs_y,
 				vector<double>(p6, p6 + sizeof(p6) / sizeof(double)), ip6, vector<double>(p6, p6 + sizeof(p6) / sizeof(double)), ip6,
-				Ls, threshold, typeTh, isGlobal, isUseCDF97, true);
+				Ls, threshold, typeTh,  isUseCDF97, true);
 			else {
 				wavelet_by_region_gray(gray, batch_size, tile_w, tile_h, res, rec, regions, regs_x, regs_y,
 					vector<double>(p6, p6 + sizeof(p6) / sizeof(double)), ip6, vector<double>(p6, p6 + sizeof(p6) / sizeof(double)), ip6,
-					Ls, threshold, typeTh, isGlobal, isUseCDF97, true);
+					Ls, threshold, typeTh,  isUseCDF97, true);
 			}
 
 			// reduced video s
